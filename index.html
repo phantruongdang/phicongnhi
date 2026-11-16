@@ -20,6 +20,7 @@ button,input,select{font-family:inherit}
 .hud .grp{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
 .pill{background:rgba(255,255,255,.93);border:3px solid var(--ink);border-radius:999px;padding:2px 14px;font-weight:800;font-size:clamp(15px,2.8vw,24px);box-shadow:0 4px 0 var(--ink);display:flex;align-items:center;gap:6px;white-space:nowrap}
 .ibtn{pointer-events:auto;width:46px;height:46px;border-radius:50%;border:3px solid var(--ink);background:#fff;font-size:22px;box-shadow:0 4px 0 var(--ink);cursor:pointer}
+.ibtn.off{opacity:.5;filter:grayscale(1)}
 .ibtn:active,.btn:active{transform:translateY(3px);box-shadow:0 1px 0 var(--ink)}
 #hearts .h{display:inline-block;font-size:1.1em}
 #hearts .lost{filter:grayscale(1);opacity:.55}
@@ -88,7 +89,7 @@ button,input,select{font-family:inherit}
 <div class="hud" id="hud" hidden>
   <div class="grp"><div class="pill" id="lvl">Level 1</div><div class="pill" id="hearts"></div></div>
   <div class="pill" id="prog">Từ 1/5</div>
-  <div class="grp"><button class="ibtn" id="bSound" title="Bật/tắt âm thanh">🔊</button><button class="ibtn" id="bHome" title="Về màn hình chính">🏠</button></div>
+  <div class="grp"><button class="ibtn" id="bMusic" title="Bật/tắt nhạc nền">🎵</button><button class="ibtn" id="bSound" title="Bật/tắt âm thanh">🔊</button><button class="ibtn" id="bHome" title="Về màn hình chính">🏠</button></div>
 </div>
 
 <div class="bottom" id="bottom" hidden>
@@ -130,6 +131,9 @@ button,input,select{font-family:inherit}
     <h2>⚙ Cài đặt trò chơi</h2>
     <div class="gen">
       <label><input type="checkbox" id="sSound"> Âm thanh</label>
+      <label><input type="checkbox" id="sMusic"> Nhạc nền</label>
+      <label>Âm lượng nhạc <select id="sMusicVol"><option value="low">Nhỏ</option><option value="mid">Vừa</option><option value="high">To</option></select></label>
+      <label><input type="checkbox" id="sDuck"> Nhạc nhỏ lại khi bé đọc</label>
       <label><input type="checkbox" id="sConfirm"> Luôn hiện nút ✔ cho bố mẹ xác nhận</label>
       <label>Độ chấm phát âm
         <select id="sStrict"><option value="easy">Dễ</option><option value="normal">Vừa</option><option value="hard">Chặt</option></select></label>
@@ -179,13 +183,13 @@ const DEFAULT_LEVELS=[
  ['Places',10,[['house','🏠'],['school','🏫'],['bus','🚌'],['hospital','🏥'],['shop','🏪']]]
 ];
 function defaults(){
-  return {sound:true,confirm:false,strict:'normal',
+  return {sound:true,confirm:false,strict:'normal',music:true,musicVol:'mid',duck:true,
     levels:DEFAULT_LEVELS.map(([name,time,ws])=>({name,time,words:ws.map(([w,img])=>({w,img}))}))};
 }
 function sanitize(o){
   const d=defaults();
   if(!o||typeof o!=='object') return d;
-  const out={sound:o.sound!==false,confirm:!!o.confirm,
+  const out={sound:o.sound!==false,confirm:!!o.confirm,music:o.music!==false,musicVol:['low','mid','high'].includes(o.musicVol)?o.musicVol:'mid',duck:o.duck!==false,
     strict:['easy','normal','hard'].includes(o.strict)?o.strict:'normal',levels:[]};
   if(!Array.isArray(o.levels)){out.levels=d.levels;return out;}
   for(let i=0;i<10;i++){
@@ -208,12 +212,13 @@ let cfg=loadCfg();
 let soundOn=cfg.sound;
 
 /* ===== Âm thanh tổng hợp bằng WebAudio (không cần file âm thanh) ===== */
-let AC=null,master=null,noiseBuf=null;
+let AC=null,master=null,noiseBuf=null,musicBus=null;
 function initAudio(){
   try{
     if(AC){if(AC.state==='suspended')AC.resume();return;}
     const C=window.AudioContext||window.webkitAudioContext; if(!C) return;
     AC=new C(); master=AC.createGain(); master.gain.value=.85; master.connect(AC.destination);
+    musicBus=AC.createGain(); musicBus.gain.value=0; musicBus.connect(master);
     noiseBuf=AC.createBuffer(1,AC.sampleRate,AC.sampleRate);
     const d=noiseBuf.getChannelData(0); for(let i=0;i<d.length;i++) d[i]=Math.random()*2-1;
   }catch(e){AC=null;}
@@ -804,7 +809,7 @@ function update(dt){
   if(G.boomT>=0) G.boomT+=dt;
   G.flash=Math.max(0,G.flash-dt*2.2); G.shake=Math.max(0,G.shake-dt*1.4);
   G.dim+=(G.dimT-G.dim)*Math.min(1,dt*3);
-  updatePilot(dt); updateParticles(dt); updateFireworks(dt);
+  musicTick(); updatePilot(dt); updateParticles(dt); updateFireworks(dt);
 }
 function render(dt){
   ctx.setTransform(DPR,0,0,DPR,0,0); ctx.clearRect(0,0,W,H);
@@ -884,7 +889,7 @@ function startLevel(i){
   renderHearts(); updateProg(); setTimerUI(L.time,L.time);
   setHeard('🎤 Hãy đọc to từ trên đám mây!');
   $('bListen').hidden=!('speechSynthesis' in window);
-  updateMicUI(); showBanner('Level '+(i+1),L.name); sfx.start();
+  updateMicUI(); showBanner('Level '+(i+1),L.name); sfx.start(); musicStart(i);
 }
 function nextWord(){
   if(G.idx>=G.words.length){levelComplete();return;}
@@ -915,14 +920,14 @@ function timeout(){
   setTimeout(()=>{if(G.mode==='exploding') say('Oops!',{pitch:1.7,rate:1.05});},900);
 }
 function gameOver(){
-  G.mode='over'; CL.on=false; stopRec();
+  G.mode='over'; CL.on=false; stopRec(); musicStop();
   const i=G.lv;
   showEnd('😵 Hết mạng rồi!','Bé thử lại Level '+(i+1)+' nhé. Cố lên!','↺ Chơi lại Level '+(i+1),()=>startLevel(i),'🏠 Về màn hình chính',goMenu);
 }
 function levelComplete(){
   G.mode='levelDone'; G.t=0; stopRec(); CL.on=false; G.fwOn=true; G.fwT=0; G.dimT=.62; confT=0; PL.rot=0; PL.lunge=0; botEl.style.visibility='hidden';
   G.next=nextLevelIdx(G.lv); G.endShown=false;
-  sfx.fanfare(); setTimeout(()=>{if(G.mode==='levelDone') say('Level complete! Great job!',{rate:.9});},700);
+  musicStop(); sfx.fanfare(); setTimeout(()=>{if(G.mode==='levelDone') say('Level complete! Great job!',{rate:.9});},700);
   showBanner('🎉 Level '+(G.lv+1)+' xong! 🎉',G.next>=0?'Sẵn sàng sang Level '+(G.next+1)+'!':'Bé đã hoàn thành tất cả!');
   setHeard('🏆 Tuyệt vời!');
 }
@@ -937,7 +942,7 @@ function levelDoneTick(){
 }
 function goNext(){const n=G.next; botEl.style.visibility=''; G.next=-1; G.fwOn=false; $('bNext').hidden=true; if(n>=0) startLevel(n);}
 function goMenu(){
-  stopRec(); try{speechSynthesis.cancel();}catch(e){}
+  stopRec(); musicStop(); try{speechSynthesis.cancel();}catch(e){}
   Object.assign(G,{mode:'menu',lv:0,fwOn:false,dimT:0,boomT:-1,pilot:null,next:-1,boost:0});
   P.length=0; FW.length=0; CL.on=false;
   Object.assign(PL,{dead:false,vis:true,dropY:0,rot:0,lunge:0});
@@ -976,6 +981,173 @@ $('bOk').onclick=()=>{if(G.mode==='waiting') correct();};
 document.addEventListener('keydown',e=>{
   if(e.key==='Enter'&&G.mode==='waiting'&&!$('bOk').hidden) correct();
 });
+
+/* ===== Nhạc nền: mỗi Level một bản nhạc vui nhộn tự tạo bằng WebAudio.
+   Muốn dùng nhạc riêng: đặt file music/level1.mp3 ... music/level10.mp3 cạnh index.html (có file nào thì Level đó dùng file đó) ===== */
+const MAJ=[0,2,4,5,7,9,11];
+const DEGREE={0:0,5:3,7:4,9:5};
+const MVOL={low:.4,mid:.7,high:1};
+/* key: tông (0=C ... 11=B), bpm, prog: 4 hợp âm (mỗi ô nhịp một hợp âm), lead: loại âm giai điệu,
+   bass: kiểu bè trầm, kick/snare/hat: trống 8 bước mỗi ô nhịp, swing: độ lắc, comp: có đệm hợp âm hay không */
+const TRACKS=[
+ {name:'Sunny Day',    key:0, bpm:112,prog:[0,5,7,0],lead:'warm',   bass:'oompah',kick:'10001000',snare:'00100010',hat:'10101010',swing:0,  comp:false},
+ {name:'Animal Parade',key:5, bpm:122,prog:[0,9,5,7],lead:'square', bass:'pulse', kick:'10001010',snare:'00100010',hat:'11111111',swing:0,  comp:true},
+ {name:'School Bell',  key:7, bpm:116,prog:[0,7,9,5],lead:'bell',   bass:'walk',  kick:'10001000',snare:'00001000',hat:'10101010',swing:0,  comp:false},
+ {name:'Fruit Salad',  key:2, bpm:124,prog:[0,5,0,7],lead:'pluck',  bass:'oompah',kick:'10001000',snare:'00101010',hat:'01010101',swing:.12,comp:true},
+ {name:'Happy Family', key:9, bpm:108,prog:[0,5,7,5],lead:'warm',   bass:'sustain',kick:'10001000',snare:'00100010',hat:'00100010',swing:0, comp:false},
+ {name:'Funky Body',   key:10,bpm:128,prog:[0,5,9,7],lead:'saw',    bass:'funky', kick:'10010010',snare:'00100010',hat:'11111111',swing:.1, comp:true},
+ {name:'Toy Factory',  key:4, bpm:132,prog:[0,7,5,7],lead:'music',  bass:'robot', kick:'10001000',snare:'00100010',hat:'10101010',swing:0,  comp:false},
+ {name:'Yummy Swing',  key:0, bpm:120,prog:[0,9,5,7],lead:'marimba',bass:'walk',  kick:'10001000',snare:'00100010',hat:'10110110',swing:.22,comp:true},
+ {name:'Rainbow Rain', key:3, bpm:100,prog:[0,7,9,5],lead:'bell',   bass:'sustain',kick:'10000000',snare:'00001000',hat:'00100010',swing:0, comp:false},
+ {name:'Grand Finale', key:7, bpm:136,prog:[0,5,7,0],lead:'saw',    bass:'pulse', kick:'10101010',snare:'00100010',hat:'11111111',swing:0,  comp:true}
+];
+const RHYTHMS=['11011010','10110101','11010110','10101101','11101010','10111010','11011011','10101011'];
+function rng(seed){let s=seed>>>0;return()=>(s=(Math.imul(s,1664525)+1013904223)>>>0)/4294967296;}
+const trackCache={};
+function buildTrack(lv){
+  const idx=((lv%10)+10)%10; if(trackCache[idx]) return trackCache[idx];
+  const T=Object.assign({},TRACKS[idx]), R=rng(idx*7919+13);
+  T.shift=T.key>6?T.key-12:T.key;
+  const motif=r=>{let w=3+Math.floor(R()*3);return[...r].map(c=>{if(c!=='1')return null;w=clamp(w+pick([-2,-1,0,1,1,2]),0,7);return w;});};
+  const mA=motif(pick(RHYTHMS)),mB=motif(pick(RHYTHMS)),order=[mA,mA,mB,mA];
+  T.mel=new Array(32).fill(null); T.dur=new Array(32).fill(1);
+  for(let b=0;b<4;b++){
+    const c0=DEGREE[T.prog[b]], c=c0>=4?c0-7:c0, m=order[b], on=[];
+    for(let k=0;k<8;k++) if(m[k]!==null){
+      let n=c+m[k];
+      if(k===0||k===4){const cand=[-7,-5,-3,0,2,4,7,9].map(o=>c+o);n=cand.reduce((a,x)=>Math.abs(x-n)<Math.abs(a-n)?x:a,cand[0]);}
+      T.mel[b*8+k]=n; on.push(k);
+    }
+    if(b===3&&on.length){const k=on[on.length-1];T.mel[b*8+k]=c;}
+    on.forEach((k,i)=>{const nx=i+1<on.length?on[i+1]:8;T.dur[b*8+k]=Math.min(nx-k,3);});
+  }
+  return trackCache[idx]=T;
+}
+const hz=m=>440*Math.pow(2,(m-69)/12);
+
+/* ===== Âm thanh nhạc (đi qua musicBus để hạ nhỏ khi bé đọc) ===== */
+function mNote(f,t,dur,type,vol,o){
+  if(!AC||!musicBus) return; o=o||{};
+  const a=o.atk||.008; dur=Math.max(dur,a+.02);
+  const osc=AC.createOscillator(),g=AC.createGain(); osc.type=type; osc.frequency.setValueAtTime(f,t);
+  if(o.slide) osc.frequency.exponentialRampToValueAtTime(o.slide,t+dur);
+  if(o.lp){const fl=AC.createBiquadFilter();fl.type='lowpass';fl.frequency.value=o.lp;osc.connect(fl);fl.connect(g);}else osc.connect(g);
+  g.gain.setValueAtTime(.0001,t); g.gain.exponentialRampToValueAtTime(vol,t+a); g.gain.exponentialRampToValueAtTime(.0001,t+dur);
+  g.connect(musicBus); osc.start(t); osc.stop(t+dur+.05);
+}
+function mNoise(t,dur,vol,f,type){
+  if(!AC||!musicBus||!noiseBuf) return;
+  const s=AC.createBufferSource(),fl=AC.createBiquadFilter(),g=AC.createGain();
+  s.buffer=noiseBuf; s.loop=true; fl.type=type; fl.frequency.value=f;
+  g.gain.setValueAtTime(vol,t); g.gain.exponentialRampToValueAtTime(.0001,t+dur);
+  s.connect(fl); fl.connect(g); g.connect(musicBus); s.start(t,Math.random()*.5); s.stop(t+dur+.02);
+}
+function mLead(tm,midi,t,dur,v){
+  const f=hz(midi);
+  switch(tm){
+    case 'square': mNote(f,t,dur*.75,'square',v*.4,{lp:2600}); break;
+    case 'bell': mNote(f,t,Math.max(dur,.5),'sine',v); mNote(f*2.01,t,.35,'sine',v*.3); mNote(f*3,t,.2,'sine',v*.1); break;
+    case 'pluck': mNote(f,t,Math.min(dur,.32),'triangle',v*1.1,{lp:3400}); break;
+    case 'warm': mNote(f,t,dur*1.05,'sine',v,{atk:.025}); mNote(f*2,t,dur,'triangle',v*.2,{atk:.025}); break;
+    case 'saw': mNote(f,t,dur*.9,'sawtooth',v*.33,{lp:2100}); break;
+    case 'music': mNote(f,t,.55,'sine',v*.9); mNote(f*4,t,.08,'sine',v*.12); break;
+    case 'marimba': mNote(f,t,.3,'sine',v*1.1); mNote(f*4,t,.07,'sine',v*.22); break;
+    default: mNote(f,t,dur,'triangle',v);
+  }
+}
+const mKick=t=>mNote(150,t,.14,'sine',.55,{slide:45});
+const mSnare=t=>{mNoise(t,.13,.24,1800,'bandpass');mNote(210,t,.09,'triangle',.12);};
+const mHat=(t,a)=>mNoise(t,a?.09:.035,a?.1:.07,7500,'highpass');
+function playStep(T,s,t,sd){
+  const bar=s>>3,st=s&7,p=T.prog[bar],c=DEGREE[p];
+  if(T.mel[s]!==null) mLead(T.lead,72+T.shift+MAJ[((T.mel[s]%7)+7)%7]+12*Math.floor(T.mel[s]/7),t,T.dur[s]*sd,.2);
+  const R=48+T.shift+MAJ[c],third=p===9?3:4,bt=(m,d,tp,v)=>mNote(hz(m),t,d,tp||'triangle',v||.26);
+  switch(T.bass){
+    case 'oompah': if(st%2===0) bt(st%4===0?R:R+7,sd*1.6); break;
+    case 'pulse': bt(st%2?R+12:R,sd*.8,'triangle',.22); break;
+    case 'walk': if(st%2===0) bt([R,R+third,R+7,R+third][st>>1],sd*1.7); break;
+    case 'sustain': if(st===0) bt(R,sd*3.8,'sine',.3); else if(st===4) bt(R+7,sd*3.8,'sine',.26); break;
+    case 'funky': if(st===0||st===3) bt(R,sd*1.2,'sawtooth',.14); else if(st===5) bt(R+12,sd,'sawtooth',.12); else if(st===6) bt(R+7,sd*1.4,'sawtooth',.13); break;
+    case 'robot': if(st%2===0) bt(R,sd*.7,'square',.1); else if(st===3||st===7) bt(R+7,sd*.7,'square',.1); break;
+  }
+  if(T.kick[st]==='1') mKick(t);
+  if(T.snare[st]==='1') mSnare(t);
+  if(T.hat[st]==='1') mHat(t,st===6);
+  if(T.comp&&(st===2||st===6)) [0,third,7].forEach(o=>mNote(hz(60+T.shift+MAJ[c]+o),t,sd*.9,'triangle',.07));
+}
+
+/* ===== Bộ phát nhạc ===== */
+const mus={want:false,lv:0,step:0,next:0,timer:0,track:null,file:false,lastVol:-1};
+const fileState={},musicEl=new Audio(); musicEl.loop=true; musicEl.preload='auto';
+const fileURL=i=>'music/level'+(i+1)+'.mp3';
+function probeFiles(){
+  for(let i=0;i<10;i++){
+    const a=new Audio(); a.preload='metadata';
+    a.onloadedmetadata=()=>{fileState[i]='ok'; if(mus.want&&mus.lv===i&&!mus.file) beginFile(i);};
+    a.onerror=()=>{fileState[i]='bad';};
+    a.src=fileURL(i);
+  }
+}
+function pump(){
+  if(!AC||!mus.track) return;
+  const T=mus.track,sd=60/T.bpm/2;
+  if(mus.next<AC.currentTime-.2) mus.next=AC.currentTime+.05;
+  while(mus.next<AC.currentTime+.15){
+    playStep(T,mus.step%32,mus.next+((mus.step&1)?T.swing*sd:0),sd); mus.next+=sd; mus.step++;
+  }
+}
+function beginSynth(lv){
+  if(!AC) return;
+  mus.track=buildTrack(lv); mus.step=0; mus.next=AC.currentTime+.08; mus.file=false;
+  clearInterval(mus.timer); mus.timer=setInterval(pump,25);
+}
+function beginFile(lv){
+  clearInterval(mus.timer); mus.track=null; mus.file=true;
+  try{musicEl.src=fileURL(lv);musicEl.currentTime=0;const pr=musicEl.play();if(pr&&pr.catch)pr.catch(()=>{});}catch(e){}
+  mus.lastVol=-1;
+}
+function musicStart(lv){
+  musicStop(); mus.want=true; mus.lv=lv; mus.lastVol=-1;
+  if(!cfg.music||!AC) return;
+  if(musicBus){musicBus.gain.cancelScheduledValues(AC.currentTime);musicBus.gain.setValueAtTime(.0001,AC.currentTime);}
+  if(fileState[lv]==='ok') beginFile(lv); else beginSynth(lv);
+}
+function musicStop(){
+  mus.want=false; clearInterval(mus.timer); mus.track=null;
+  if(mus.file){try{musicEl.pause();}catch(e){}} mus.file=false;
+  if(AC&&musicBus){musicBus.gain.cancelScheduledValues(AC.currentTime);musicBus.gain.setTargetAtTime(0,AC.currentTime,.06);}
+  mus.lastVol=-1;
+}
+function musicActive(){return ['intro','approach','waiting','celebrate','exploding','respawn'].includes(G.mode);}
+function musicSync(){
+  if(cfg.music&&musicActive()&&!mus.want) musicStart(G.lv);
+  else if((!cfg.music||!musicActive())&&mus.want) musicStop();
+  musicUI();
+}
+function musicUI(){$('bMusic').classList.toggle('off',!cfg.music);}
+/* hạ nhỏ nhạc khi bé đang đọc để micro nghe rõ hơn */
+function musicTick(){
+  if(!mus.want||!AC) return;
+  let v=(soundOn&&cfg.music)?(MVOL[cfg.musicVol]||.7):0;
+  if(G.mode==='waiting'&&cfg.duck) v*=.3;
+  if(speaking) v*=.4;
+  if(Math.abs(v-mus.lastVol)<.004) return;
+  mus.lastVol=v;
+  if(musicBus) musicBus.gain.setTargetAtTime(v*.55,AC.currentTime,.12);
+  try{musicEl.volume=clamp(v,0,1);}catch(e){}
+}
+$('bMusic').onclick=()=>{
+  initAudio(); cfg.music=!cfg.music; saveCfg();
+  if(cfg.music&&musicActive()) musicStart(G.lv); else if(!cfg.music) musicStop();
+  musicUI();
+};
+document.addEventListener('visibilitychange',()=>{
+  try{
+    if(document.hidden){if(AC&&AC.state==='running')AC.suspend();if(mus.file)musicEl.pause();}
+    else{if(AC&&AC.state==='suspended')AC.resume();if(mus.file&&mus.want)musicEl.play().catch(()=>{});}
+  }catch(e){}
+});
+probeFiles(); musicUI();
 
 /* ===== Màn hình cài đặt: từ vựng, hình minh họa, thời gian cho từng Level ===== */
 let draft=null,curTab=0,resetArm=0;
@@ -1044,13 +1216,18 @@ function syncDraft(){
   L.name=$('lName').value.trim(); L.time=Number($('lTime').value)||15;
   L.words=[...$('rows').children].map(r=>({w:r.querySelector('.in-w').value.trim(),img:r._img||''}));
 }
+function setCtl(){
+  $('sSound').checked=draft.sound; $('sConfirm').checked=draft.confirm; $('sStrict').value=draft.strict;
+  $('sMusic').checked=draft.music; $('sMusicVol').value=draft.musicVol; $('sDuck').checked=draft.duck;
+}
 function collect(){
   syncDraft(); draft.sound=$('sSound').checked; draft.confirm=$('sConfirm').checked; draft.strict=$('sStrict').value;
+  draft.music=$('sMusic').checked; draft.musicVol=$('sMusicVol').value; draft.duck=$('sDuck').checked;
   return sanitize(draft);
 }
 function openSettings(){
   draft=clone(cfg); curTab=Math.max(0,parseInt($('startLevel').value,10)||0);
-  $('sSound').checked=draft.sound; $('sConfirm').checked=draft.confirm; $('sStrict').value=draft.strict;
+  setCtl();
   $('sMsg').textContent=''; $('bReset').textContent='↺ Khôi phục mặc định';
   renderTabs(); renderLevel(); $('settings').classList.add('show');
 }
@@ -1062,7 +1239,7 @@ $('bAdd').onclick=()=>{
 };
 $('bSave').onclick=()=>{
   cfg=collect(); soundOn=cfg.sound; $('bSound').textContent=soundOn?'🔊':'🔇';
-  const ok=saveCfg(); refreshMenu(); updateMicUI();
+  const ok=saveCfg(); refreshMenu(); updateMicUI(); musicSync();
   if(ok) $('settings').classList.remove('show');
   else $('sMsg').textContent='Đã áp dụng nhưng chưa lưu được vào trình duyệt (ảnh tải lên quá nặng?). Hãy dùng emoji, link ảnh hoặc ảnh nhỏ hơn.';
 };
@@ -1078,7 +1255,7 @@ $('fImport').onchange=()=>{
   fr.onload=()=>{
     try{
       draft=sanitize(JSON.parse(fr.result)); curTab=0;
-      $('sSound').checked=draft.sound; $('sConfirm').checked=draft.confirm; $('sStrict').value=draft.strict;
+      setCtl();
       renderTabs(); renderLevel(); $('sMsg').textContent='Đã nhập file. Bấm "Lưu và đóng" để áp dụng.';
     }catch(e){$('sMsg').textContent='File không đúng định dạng.';}
   };
@@ -1089,7 +1266,7 @@ $('bReset').onclick=()=>{
   if(Date.now()-resetArm>3500){resetArm=Date.now();b.textContent='Bấm lần nữa để xác nhận';return;}
   resetArm=0; b.textContent='↺ Khôi phục mặc định';
   draft=defaults(); curTab=0;
-  $('sSound').checked=draft.sound; $('sConfirm').checked=draft.confirm; $('sStrict').value=draft.strict;
+  setCtl();
   renderTabs(); renderLevel(); $('sMsg').textContent='Đã khôi phục. Bấm "Lưu và đóng" để áp dụng.';
 };
 
@@ -1099,7 +1276,7 @@ try{if(document.fonts&&document.fonts.load) document.fonts.load('800 40px "Baloo
 layout(); sceneInit(); refreshMenu();
 addEventListener('resize',()=>{layout();});
 requestAnimationFrame(frame);
-window.__game={G,PL,CL,startLevel,correct,timeout,levelComplete,isCorrect,goMenu,getCfg:()=>cfg,hearts:renderHearts};
+window.__game={mus,buildTrack,TRACKS,audio:()=>({AC,master,musicBus}),G,PL,CL,startLevel,correct,timeout,levelComplete,isCorrect,goMenu,getCfg:()=>cfg,hearts:renderHearts};
 })();
 
 </script>
